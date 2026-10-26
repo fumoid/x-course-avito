@@ -172,10 +172,3 @@ func hashCreateInput(in CreateInput) string {
 	)))
 	return hex.EncodeToString(sum[:])
 }
-
-func (s *Service) Ping(ctx context.Context) error {
-	if err := s.repo.pool.Ping(ctx); err != nil {
-		return fmt.Errorf("ping: %w", err)
-	}
-	return nil
-}

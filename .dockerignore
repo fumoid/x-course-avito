@@ -1,0 +1,13 @@
+.git
+.tripgo
+.env
+.env.*
+!.env.example
+bin
+.idea
+.vscode
+.DS_Store
+**/*_test.go
+coverage.out
+*.md
+!README.md

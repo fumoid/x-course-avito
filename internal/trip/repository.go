@@ -191,18 +191,47 @@ func (r *Repository) FindIdempotency(ctx context.Context, key uuid.UUID, now tim
 	return &rec, nil
 }
 
-func (r *Repository) SaveIdempotency(ctx context.Context, rec IdempotencyRecord) error {
+func (r *Repository) DeleteExpiredIdempotency(ctx context.Context, key uuid.UUID, now time.Time) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
+	query, args, err := psql.Delete("idempotency_keys").
+		Where(sq.Eq{"key": key}).
+		Where(sq.LtOrEq{"expires_at": now}).
+		ToSql()
+	if err != nil {
+		return fmt.Errorf("build delete expired idempotency key: %w", err)
+	}
+	if _, err := tx.Executor(ctx, r.pool).Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("delete expired idempotency key: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) SaveIdempotency(ctx context.Context, rec IdempotencyRecord, now time.Time) error {
 	ctx, cancel := r.withTimeout(ctx)
 	defer cancel()
 
 	query, args, err := psql.Insert("idempotency_keys").
 		Columns("key", "request_hash", "trip_id", "expires_at").
 		Values(rec.Key, rec.RequestHash, rec.TripID, rec.ExpiresAt).
+		Suffix(`ON CONFLICT (key) DO UPDATE SET
+			request_hash = EXCLUDED.request_hash,
+			trip_id = EXCLUDED.trip_id,
+			expires_at = EXCLUDED.expires_at
+		WHERE idempotency_keys.expires_at <= ?
+		RETURNING key`, now).
 		ToSql()
 	if err != nil {
 		return fmt.Errorf("build insert idempotency key: %w", err)
 	}
-	if _, err := tx.Executor(ctx, r.pool).Exec(ctx, query, args...); err != nil {
+
+	var saved uuid.UUID
+	err = tx.Executor(ctx, r.pool).QueryRow(ctx, query, args...).Scan(&saved)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errUniqueIdempotency
+	}
+	if err != nil {
 		if constraintName(err) == idempotencyKeyConstraint {
 			return errUniqueIdempotency
 		}

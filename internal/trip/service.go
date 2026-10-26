@@ -41,11 +41,16 @@ func (s *Service) Create(ctx context.Context, in CreateInput, idempotencyKey *uu
 	var replay bool
 
 	err := s.txm.Do(ctx, func(ctx context.Context) error {
+		now := time.Now().UTC().Truncate(time.Microsecond)
+
 		if idempotencyKey != nil {
 			if err := s.repo.LockIdempotencyKey(ctx, *idempotencyKey); err != nil {
 				return err
 			}
-			rec, err := s.repo.FindIdempotency(ctx, *idempotencyKey, time.Now().UTC())
+			if err := s.repo.DeleteExpiredIdempotency(ctx, *idempotencyKey, now); err != nil {
+				return err
+			}
+			rec, err := s.repo.FindIdempotency(ctx, *idempotencyKey, now)
 			if err != nil {
 				return err
 			}
@@ -63,7 +68,6 @@ func (s *Service) Create(ctx context.Context, in CreateInput, idempotencyKey *uu
 			}
 		}
 
-		now := time.Now().UTC().Truncate(time.Microsecond)
 		created = Trip{
 			ID:        uuid.New(),
 			UserID:    in.UserID,
@@ -89,9 +93,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput, idempotencyKey *uu
 				RequestHash: requestHash,
 				TripID:      created.ID,
 				ExpiresAt:   now.Add(s.idTTL),
-			})
+			}, now)
 			if errors.Is(err, errUniqueIdempotency) {
-				rec, findErr := s.repo.FindIdempotency(ctx, *idempotencyKey, time.Now().UTC())
+				rec, findErr := s.repo.FindIdempotency(ctx, *idempotencyKey, now)
 				if findErr != nil {
 					return findErr
 				}

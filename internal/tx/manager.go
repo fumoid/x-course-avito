@@ -13,10 +13,6 @@ import (
 
 type txKey struct{}
 
-type TxManager interface {
-	Do(ctx context.Context, fn func(ctx context.Context) error) error
-}
-
 type Manager struct {
 	pool         *pgxpool.Pool
 	queryTimeout time.Duration

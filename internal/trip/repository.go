@@ -16,7 +16,6 @@ import (
 )
 
 const driverBusyIndex = "trips_one_active_per_driver_idx"
-const idempotencyKeyConstraint = "idempotency_keys_pkey"
 
 var psql = sq.StatementBuilder.PlaceholderFormat(sq.Dollar)
 
@@ -208,39 +207,22 @@ func (r *Repository) DeleteExpiredIdempotency(ctx context.Context, key uuid.UUID
 	return nil
 }
 
-func (r *Repository) SaveIdempotency(ctx context.Context, rec IdempotencyRecord, now time.Time) error {
+func (r *Repository) SaveIdempotency(ctx context.Context, rec IdempotencyRecord) error {
 	ctx, cancel := r.withTimeout(ctx)
 	defer cancel()
 
 	query, args, err := psql.Insert("idempotency_keys").
 		Columns("key", "request_hash", "trip_id", "expires_at").
 		Values(rec.Key, rec.RequestHash, rec.TripID, rec.ExpiresAt).
-		Suffix(`ON CONFLICT (key) DO UPDATE SET
-			request_hash = EXCLUDED.request_hash,
-			trip_id = EXCLUDED.trip_id,
-			expires_at = EXCLUDED.expires_at
-		WHERE idempotency_keys.expires_at <= ?
-		RETURNING key`, now).
 		ToSql()
 	if err != nil {
 		return fmt.Errorf("build insert idempotency key: %w", err)
 	}
-
-	var saved uuid.UUID
-	err = tx.Executor(ctx, r.pool).QueryRow(ctx, query, args...).Scan(&saved)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errUniqueIdempotency
-	}
-	if err != nil {
-		if constraintName(err) == idempotencyKeyConstraint {
-			return errUniqueIdempotency
-		}
+	if _, err := tx.Executor(ctx, r.pool).Exec(ctx, query, args...); err != nil {
 		return fmt.Errorf("insert idempotency key: %w", err)
 	}
 	return nil
 }
-
-var errUniqueIdempotency = errors.New("idempotency key already exists")
 
 func constraintName(err error) string {
 	var pgErr *pgconn.PgError

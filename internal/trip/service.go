@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -88,32 +87,12 @@ func (s *Service) Create(ctx context.Context, in CreateInput, idempotencyKey *uu
 			return err
 		}
 		if idempotencyKey != nil {
-			err := s.repo.SaveIdempotency(ctx, IdempotencyRecord{
+			if err := s.repo.SaveIdempotency(ctx, IdempotencyRecord{
 				Key:         *idempotencyKey,
 				RequestHash: requestHash,
 				TripID:      created.ID,
 				ExpiresAt:   now.Add(s.idTTL),
-			}, now)
-			if errors.Is(err, errUniqueIdempotency) {
-				rec, findErr := s.repo.FindIdempotency(ctx, *idempotencyKey, now)
-				if findErr != nil {
-					return findErr
-				}
-				if rec == nil {
-					return ErrIdempotencyConflict
-				}
-				if rec.RequestHash != requestHash {
-					return ErrIdempotencyConflict
-				}
-				existing, getErr := s.repo.Get(ctx, rec.TripID)
-				if getErr != nil {
-					return getErr
-				}
-				created = existing
-				replay = true
-				return nil
-			}
-			if err != nil {
+			}); err != nil {
 				return err
 			}
 		}

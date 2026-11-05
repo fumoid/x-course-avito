@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -20,6 +21,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("DATABASE_CONNECT_TIMEOUT", "")
 	t.Setenv("DATABASE_QUERY_TIMEOUT", "")
 	t.Setenv("IDEMPOTENCY_TTL", "")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	t.Setenv("OTEL_TRACES_SAMPLER", "")
+	t.Setenv(otelSemConvStabilityOptIn, "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -34,10 +38,31 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.IdempotencyTTL != 24*time.Hour {
 		t.Fatalf("IDEMPOTENCY_TTL = %s", cfg.IdempotencyTTL)
 	}
+	if cfg.OTELServiceName != "trip-service" {
+		t.Fatalf("OTEL_SERVICE_NAME = %s", cfg.OTELServiceName)
+	}
+	if cfg.OTELTracesSampler != "parentbased_always_on" {
+		t.Fatalf("OTEL_TRACES_SAMPLER = %s", cfg.OTELTracesSampler)
+	}
+	if got := os.Getenv(otelSemConvStabilityOptIn); got != defaultOTELSemConvOptIn {
+		t.Fatalf("OTEL_SEMCONV_STABILITY_OPT_IN = %q, want %q", got, defaultOTELSemConvOptIn)
+	}
+}
+
+func TestLoadKeepsExistingSemConvOptIn(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://tripgo:tripgo@localhost:5432/tripgo?sslmode=disable")
+	t.Setenv(otelSemConvStabilityOptIn, "http")
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv(otelSemConvStabilityOptIn); got != "http" {
+		t.Fatalf("OTEL_SEMCONV_STABILITY_OPT_IN = %q, want http", got)
+	}
 }
 
 func TestLoadRejectsZeroTimeout(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://tripgo:tripgo@localhost:5432/tripgo?sslmode=disable")
+	t.Setenv(otelSemConvStabilityOptIn, "")
 	t.Setenv("HTTP_READ_TIMEOUT", "0s")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error for zero timeout")
@@ -46,6 +71,7 @@ func TestLoadRejectsZeroTimeout(t *testing.T) {
 
 func TestLoadRejectsMinGreaterThanMax(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://tripgo:tripgo@localhost:5432/tripgo?sslmode=disable")
+	t.Setenv(otelSemConvStabilityOptIn, "")
 	t.Setenv("DATABASE_MAX_CONNS", "2")
 	t.Setenv("DATABASE_MIN_CONNS", "5")
 	if _, err := Load(); err == nil {

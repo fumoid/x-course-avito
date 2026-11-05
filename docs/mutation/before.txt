@@ -1,0 +1,11 @@
+gremlins unleash --coverpkg=./internal/domain/...,./internal/usecase/... --output docs/mutation/before.json .
+
+Mutation testing completed in 8 seconds 691 milliseconds
+Killed: 44, Lived: 2, Not covered: 199
+Timed out: 0, Not viable: 0, Skipped: 0
+Test efficacy: 95.65%
+Mutator coverage: 18.78%
+
+Lived (domain):
+  CONDITIONALS_BOUNDARY at internal/domain/trip/trip.go:94:50
+  CONDITIONALS_BOUNDARY at internal/domain/trip/trip.go:97:64

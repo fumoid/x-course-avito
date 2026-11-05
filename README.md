@@ -1,12 +1,15 @@
-# TripGo — лабораторная работа 1
+# TripGo — лабораторная работа 2
 
-Сервис создаёт, отдаёт и завершает поездки. Данные в PostgreSQL.
-Сделаны основная часть и оба бонуса: Idempotency-Key и Docker.
+Сервис создаёт, отдаёт и завершает поездки. Снаружи контракт тот же, что в ЛР1:
+HTTP API, PostgreSQL, идемпотентность и Docker. Внутри код разложен по слоям,
+покрыт тестами, проходит линтер и отдаёт логи, метрики и трейсы в OpenTelemetry.
 
 ## Запуск
 
 Нужны Go 1.24, make, Docker и [tripgoctl](https://github.com/course-go-autumn-2026/course-infra).
-goose и oapi-codegen уже в go.mod, ставить отдельно не надо.
+goose, oapi-codegen и mockgen уже в `go.mod` как `go tool`, ставить отдельно не надо.
+
+golangci-lint **v2.5.0** ставится командой `make lint` через `go run`.
 
 ```sh
 tripgoctl cluster start
@@ -16,17 +19,24 @@ make migrate
 make run
 ```
 
-`environment start` кладёт в `.env` адрес базы. Makefile читает `.env.example`, потом `.env`.
-Копировать example поверх `.env` не нужно: кроме `DATABASE_URL` у всего есть дефолты.
+`environment start` кладёт в `.env` адрес базы и OTLP-коллектора. Makefile читает
+`.env.example`, потом `.env`. Обязательна только `DATABASE_URL`.
 
 Сервис на `:8080`. Стоп — Ctrl+C, окружение — `tripgoctl environment stop`.
-Переопределить настройку: `make run SHUTDOWN_TIMEOUT=2s` (аргумент make сильнее файлов).
 
 ```sh
-make generate      # код из OpenAPI
-make migrate-down  # откатить одну миграцию
-make test          # go test -race ./...  (на ЛР1 тестов почти нет)
+make generate          # OpenAPI + mockgen (go generate ./...)
+make test              # go test -race, покрытие domain+usecase
+make test-integration  # PostgreSQL, билд-тег integration
+make lint              # golangci-lint v2.5.0
 ```
+
+`make generate` из чистого клона:
+
+1. `go tool oapi-codegen` — код из OpenAPI.
+2. `go generate ./...` — моки `mockgen` рядом с `contract.go`.
+
+Версия mockgen: `go.uber.org/mock v0.5.2` (`go tool mockgen`).
 
 ## Проверка
 
@@ -59,6 +69,16 @@ curl -i -X POST localhost:8080/api/v1/trips/$TRIP_ID/finish
 
 Второе завершение — `409 trip_completed`. Ошибки поездок — `application/problem+json` с полем `code`.
 
+### Observability
+
+Ссылки на Jaeger и Grafana печатает `tripgoctl connect`. После запроса:
+
+- в логе есть `trace_id` / `span_id` и строка `request handled` с шаблоном маршрута;
+- в Jaeger тот же `trace_id`: корневой HTTP-спан и дочерние SQL;
+- в Grafana `http_server_request_duration` и `tripgo_trips_created`.
+
+Если коллектор недоступен, сервис продолжает отвечать.
+
 ### Idempotency-Key
 
 Сначала завершите поездку из примера, иначе будет `driver_busy`.
@@ -75,26 +95,21 @@ curl -i -X POST localhost:8080/api/v1/trips \
 ```
 
 Первый раз — `201`. Повтор как есть — `200` и тот же id. С тем же ключом, но другой ценой — `409 idempotency_conflict`.
-Без заголовка всё как обычно.
 
 Ключ живёт 24 часа (`IDEMPOTENCY_TTL`). Повторы срок не продлевают. Когда протух — можно занять снова.
 
 ## Docker
 
 Образ: `gcr.io/distroless/static-debian12:nonroot`, внутри только бинарь, не root.
-Размер **12.7 МБ** (`docker images trip-service`).
 
 ```sh
 docker build -f deploy/Dockerfile -t trip-service .
 docker run --rm --network host --env-file .env trip-service
 ```
 
-`--network host`, чтобы контейнер видел Postgres из tripgoctl на localhost. Так проще на Linux.
-Проверка — тот же `/ready`.
-
 ## Переменные
 
-Полный список в `.env.example`. Обязательна только `DATABASE_URL`, её пишет tripgoctl.
+Полный список в `.env.example`. Обязательна только `DATABASE_URL`.
 
 | Переменная | Дефолт | Зачем |
 |---|---|---|
@@ -112,26 +127,77 @@ docker run --rm --network host --env-file .env trip-service
 | DATABASE_CONNECT_TIMEOUT | 5s | коннект и ping на старте |
 | DATABASE_QUERY_TIMEOUT | 3s | запросы, begin/commit/rollback, /ready |
 | IDEMPOTENCY_TTL | 24h | сколько живёт ключ |
+| OTEL_SERVICE_NAME | trip-service | имя в логах и трейсах |
+| OTEL_EXPORTER_OTLP_ENDPOINT | — | адрес коллектора из tripgoctl |
+| OTEL_EXPORTER_OTLP_PROTOCOL | grpc | grpc или http/protobuf |
+| OTEL_TRACES_SAMPLER | parentbased_always_on | always_on / always_off / traceidratio / parentbased_* |
+| OTEL_RESOURCE_ATTRIBUTES | service.namespace=tripgo,deployment.environment=local | ресурс SDK |
+| OTEL_SEMCONV_STABILITY_OPT_IN | http/dup | otelhttp: `http.server.request.duration` в секундах |
 
 Нулевой таймаут или `MIN_CONNS > MAX_CONNS` — сервис не стартует.
 
+## Архитектура
+
+Слои из §4.1 задания. Зависимости направлены внутрь: транспорт знает usecase,
+usecase знает домен, домен никого не знает.
+
+```
+cmd/trip-service          читает конфиг, container.New, ждёт сигнала
+internal/config           env
+internal/container        единственное место pgxpool.New и конструкторов
+internal/domain/trip      статусы, Trip.Finish, доменные ошибки
+internal/usecase/trip/{create,get,finish}
+internal/http/trip/{create,get,finish}
+internal/http/domainerror единый маппинг ошибка → Problem
+internal/http/middleware  Recover → Tracing → Logging → Metrics
+internal/repository/trip
+internal/infra/postgres   пул и SQL-tracer
+internal/infra/postgres/transaction
+internal/infra/telemetry  OTel SDK и slog
+internal/generated
+```
+
+Отдельного `internal/model` нет: между слоями ходит `domain/trip.Trip`. Дублировать
+поля в DTO незачем — сущность уже описывает поездку, а OpenAPI-типы появляются
+только на границе HTTP.
+
+Интерфейсы зависимостей объявлены **неэкспортируемыми** в `contract.go` пакета-потребителя
+(usecase, хендлер, middleware), а не рядом с реализацией. Моки генерирует mockgen
+в `mocks_test.go` рядом с кодом. Сборка вручную в `container`, без DI-фреймворка
+и без `slog.Default()` в бизнес-коде.
+
+`depguard` запрещает домену и usecase тянуть HTTP/pgx/squirrel, usecase — generated
+OpenAPI, HTTP-слою — repository и infra.
+
+Переход `active → completed` делает `Trip.Finish(at)` на реальном пути finish.
+Одно и то же `at` пишется в строку поездки, историю статусов и ответ.
+
 ## Решения
 
-Я поставил Read Committed (дефолт Postgres). Две активные поездки режет partial unique index
-`trips_one_active_per_driver_idx` на `driver_id WHERE status = 'active'`, а не snapshot,
-так что SERIALIZABLE тут ни к чему — только лишние serialization failure.
+Изоляция Read Committed. Две активные поездки режет partial unique index
+`trips_one_active_per_driver_idx`. TxManager.Do кладёт pgx.Tx в context, вложенный
+Do вторую транзакцию не открывает. Поездка и история статусов пишутся в одном Do.
 
-TxManager.Do кладёт pgx.Tx в context. Репозиторий сам смотрит: есть транзакция — работает через неё,
-нет — через пул. Успех — commit, ошибка или паника — rollback. Вложенный Do вторую транзакцию не открывает.
-На begin/commit/rollback свой таймаут. Rollback идёт на контексте без отмены, чтобы он доехал,
-даже если клиент уже отвалился.
+Finish: домен решает, можно ли завершить; репозиторий делает `UPDATE ... WHERE status = 'active'`,
+чтобы из двух параллельных завершился один.
 
-Finish — `UPDATE ... WHERE status = 'active'`. Из двух параллельных завершит один, второй
-дочитывает строку и отдаёт 409 или 404.
+JSON: сначала ключи (нет поля / null / extra / другой регистр — 400), потом decode.
+Нулевая цена нормальная. Нулевой UUID пользователя или водителя — 400, usecase не зовётся.
 
-Поездка и история статусов пишутся в одном Do, так что если история упала — поездки тоже нет.
+HTTP-метрика длительности — только `otelhttp`. Счётчик активных запросов свой, с шаблоном
+chi (`/api/v1/trips/{tripId}`), без UUID в лейбле. На otelhttp v0.60 без
+`OTEL_SEMCONV_STABILITY_OPT_IN=http/dup` уходит старое имя `http.server.duration` в
+миллисекундах; с этим флагом появляется `http.server.request.duration` в секундах.
+`config.Load` выставляет `http/dup`, если переменная пустая.
 
-JSON: сначала смотрю, какие ключи пришли (нет поля / null / extra / другой регистр — 400),
-потом decode. Нулевая цена нормальная, если `price` реально передали.
+SQL инструментируется на пуле своим `QueryTracer`, а не `otelpgx`: у otelpgx часто нет
+`db.collection.name` и `error.type`, а задание их требует. Спан — kind `client`.
+Гистограмма `db.client.operation.duration` пишется всегда, даже если трейс не семплирован.
+Счётчик активных поездок не открывает отдельный корневой SQL-трейс: спан создаётся
+только при валидном родительском `SpanContext`.
 
-SHUTDOWN_TIMEOUT общий: и HTTP, и закрытие пула.
+Порядок middleware из задания: Recover снаружи Tracing, поэтому в `panic recovered`
+нет `trace_id`. Тот же запрос виден в `request handled` со статусом 500 и `trace_id`.
+Входящий `traceparent` читает стандартный W3C-пропагатор (`otel.SetTextMapPropagator`).
+
+Имя сервиса в логах и трейсах одно — `OTEL_SERVICE_NAME`.

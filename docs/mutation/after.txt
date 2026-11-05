@@ -1,0 +1,7 @@
+gremlins unleash --coverpkg=./internal/domain/...,./internal/usecase/... --output docs/mutation/after.json .
+
+Mutation testing completed in 8 seconds 843 milliseconds
+Killed: 47, Lived: 0, Not covered: 198
+Timed out: 0, Not viable: 0, Skipped: 0
+Test efficacy: 100.00%
+Mutator coverage: 19.18%

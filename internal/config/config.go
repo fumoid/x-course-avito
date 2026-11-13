@@ -22,23 +22,35 @@ const (
 	defaultDatabaseConnect       = "5s"
 	defaultDatabaseQuery         = "3s"
 	defaultIdempotencyTTL        = "24h"
+	defaultOTELServiceName       = "trip-service"
+	defaultOTELProtocol          = "grpc"
+	defaultOTELSampler           = "parentbased_always_on"
+	defaultOTELResourceAttrs     = "service.namespace=tripgo,deployment.environment=local"
+	otelSemConvStabilityOptIn    = "OTEL_SEMCONV_STABILITY_OPT_IN"
+	defaultOTELSemConvOptIn      = "http/dup"
 )
 
 type Config struct {
-	HTTPAddr                string
-	LogLevel                string
-	ShutdownTimeout         time.Duration
-	HTTPReadTimeout         time.Duration
-	HTTPReadHeaderTimeout   time.Duration
-	HTTPWriteTimeout        time.Duration
-	HTTPIdleTimeout         time.Duration
-	DatabaseURL             string
-	DatabaseMaxConns        int32
-	DatabaseMinConns        int32
-	DatabaseMaxConnLifetime time.Duration
-	DatabaseConnectTimeout  time.Duration
-	DatabaseQueryTimeout    time.Duration
-	IdempotencyTTL          time.Duration
+	HTTPAddr                 string
+	LogLevel                 string
+	ShutdownTimeout          time.Duration
+	HTTPReadTimeout          time.Duration
+	HTTPReadHeaderTimeout    time.Duration
+	HTTPWriteTimeout         time.Duration
+	HTTPIdleTimeout          time.Duration
+	DatabaseURL              string
+	DatabaseMaxConns         int32
+	DatabaseMinConns         int32
+	DatabaseMaxConnLifetime  time.Duration
+	DatabaseConnectTimeout   time.Duration
+	DatabaseQueryTimeout     time.Duration
+	IdempotencyTTL           time.Duration
+	OTELServiceName          string
+	OTELExporterOTLPEndpoint string
+	OTELExporterOTLPProtocol string
+	OTELTracesSampler        string
+	OTELTracesSamplerArg     string
+	OTELResourceAttributes   string
 }
 
 func Load() (Config, error) {
@@ -102,21 +114,29 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("DATABASE_MIN_CONNS must be less than or equal to DATABASE_MAX_CONNS")
 	}
 
+	enableHTTPRequestDuration()
+
 	return Config{
-		HTTPAddr:                httpAddr,
-		LogLevel:                logLevel,
-		ShutdownTimeout:         shutdownTimeout,
-		HTTPReadTimeout:         readTimeout,
-		HTTPReadHeaderTimeout:   readHeaderTimeout,
-		HTTPWriteTimeout:        writeTimeout,
-		HTTPIdleTimeout:         idleTimeout,
-		DatabaseURL:             databaseURL,
-		DatabaseMaxConns:        maxConns,
-		DatabaseMinConns:        minConns,
-		DatabaseMaxConnLifetime: lifetime,
-		DatabaseConnectTimeout:  connectTimeout,
-		DatabaseQueryTimeout:    queryTimeout,
-		IdempotencyTTL:          ttl,
+		HTTPAddr:                 httpAddr,
+		LogLevel:                 logLevel,
+		ShutdownTimeout:          shutdownTimeout,
+		HTTPReadTimeout:          readTimeout,
+		HTTPReadHeaderTimeout:    readHeaderTimeout,
+		HTTPWriteTimeout:         writeTimeout,
+		HTTPIdleTimeout:          idleTimeout,
+		DatabaseURL:              databaseURL,
+		DatabaseMaxConns:         maxConns,
+		DatabaseMinConns:         minConns,
+		DatabaseMaxConnLifetime:  lifetime,
+		DatabaseConnectTimeout:   connectTimeout,
+		DatabaseQueryTimeout:     queryTimeout,
+		IdempotencyTTL:           ttl,
+		OTELServiceName:          envOrDefault("OTEL_SERVICE_NAME", defaultOTELServiceName),
+		OTELExporterOTLPEndpoint: envOrDefault("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		OTELExporterOTLPProtocol: strings.ToLower(envOrDefault("OTEL_EXPORTER_OTLP_PROTOCOL", defaultOTELProtocol)),
+		OTELTracesSampler:        strings.ToLower(envOrDefault("OTEL_TRACES_SAMPLER", defaultOTELSampler)),
+		OTELTracesSamplerArg:     envOrDefault("OTEL_TRACES_SAMPLER_ARG", ""),
+		OTELResourceAttributes:   envOrDefault("OTEL_RESOURCE_ATTRIBUTES", defaultOTELResourceAttrs),
 	}, nil
 }
 
@@ -158,6 +178,12 @@ func int32Env(name, fallback string, minimum int64) (int32, error) {
 		return 0, fmt.Errorf("%s must be greater than or equal to %d", name, minimum)
 	}
 	return int32(parsed), nil
+}
+
+func enableHTTPRequestDuration() {
+	if strings.TrimSpace(os.Getenv(otelSemConvStabilityOptIn)) == "" {
+		_ = os.Setenv(otelSemConvStabilityOptIn, defaultOTELSemConvOptIn)
+	}
 }
 
 func validateLogLevel(level string) error {

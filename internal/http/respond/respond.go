@@ -24,15 +24,41 @@ func Trip(t domain.Trip) api.Trip {
 		utc := t.FinishedAt.UTC()
 		finished = &utc
 	}
-	return api.Trip{
-		Id:         t.ID,
-		UserId:     t.UserID,
-		DriverId:   t.DriverID,
-		StartPoint: api.Coordinates{Latitude: t.StartLat, Longitude: t.StartLon},
-		EndPoint:   api.Coordinates{Latitude: t.EndLat, Longitude: t.EndLon},
-		Price:      t.Price,
-		Status:     api.TripStatus(t.Status),
-		StartedAt:  started,
-		FinishedAt: finished,
+	var lastPositionAt *time.Time
+	if t.LastPositionAt != nil {
+		utc := t.LastPositionAt.UTC()
+		lastPositionAt = &utc
 	}
+	return api.Trip{
+		Id:             t.ID,
+		UserId:         t.UserID,
+		DriverId:       t.DriverID,
+		StartPoint:     api.Coordinates{Latitude: t.StartLat, Longitude: t.StartLon},
+		EndPoint:       api.Coordinates{Latitude: t.EndLat, Longitude: t.EndLon},
+		Price:          t.Price,
+		Status:         api.TripStatus(t.Status),
+		StartedAt:      started,
+		FinishedAt:     finished,
+		LastPositionAt: lastPositionAt,
+	}
+}
+
+func Position(p domain.Position) api.TripPosition {
+	return api.TripPosition{
+		Id:     p.ID,
+		TripId: p.TripID,
+		Coordinates: api.Coordinates{
+			Latitude:  p.Latitude,
+			Longitude: p.Longitude,
+		},
+		RecordedAt: p.RecordedAt.UTC(),
+	}
+}
+
+func Positions(positions []domain.Position) api.TripPositionsResponse {
+	items := make([]api.TripPosition, 0, len(positions))
+	for _, p := range positions {
+		items = append(items, Position(p))
+	}
+	return api.TripPositionsResponse{Positions: items}
 }

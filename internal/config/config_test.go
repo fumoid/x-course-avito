@@ -21,6 +21,13 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("DATABASE_CONNECT_TIMEOUT", "")
 	t.Setenv("DATABASE_QUERY_TIMEOUT", "")
 	t.Setenv("IDEMPOTENCY_TTL", "")
+	t.Setenv("POSITION_CHECK_INTERVAL", "")
+	t.Setenv("POSITION_STALE_AFTER", "")
+	t.Setenv("POSITION_WORKERS", "")
+	t.Setenv("POSITION_QUEUE_SIZE", "")
+	t.Setenv("POSITION_SCAN_BATCH_SIZE", "")
+	t.Setenv("PUSH_HTTP_URL", "")
+	t.Setenv("PUSH_REQUEST_TIMEOUT", "")
 	t.Setenv("OTEL_SERVICE_NAME", "")
 	t.Setenv("OTEL_TRACES_SAMPLER", "")
 	t.Setenv(otelSemConvStabilityOptIn, "")
@@ -37,6 +44,27 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.IdempotencyTTL != 24*time.Hour {
 		t.Fatalf("IDEMPOTENCY_TTL = %s", cfg.IdempotencyTTL)
+	}
+	if cfg.PositionCheckInterval != 30*time.Second {
+		t.Fatalf("POSITION_CHECK_INTERVAL = %s", cfg.PositionCheckInterval)
+	}
+	if cfg.PositionStaleAfter != 60*time.Second {
+		t.Fatalf("POSITION_STALE_AFTER = %s", cfg.PositionStaleAfter)
+	}
+	if cfg.PositionWorkers != 4 {
+		t.Fatalf("POSITION_WORKERS = %d", cfg.PositionWorkers)
+	}
+	if cfg.PositionQueueSize != 100 {
+		t.Fatalf("POSITION_QUEUE_SIZE = %d", cfg.PositionQueueSize)
+	}
+	if cfg.PositionScanBatchSize != 100 {
+		t.Fatalf("POSITION_SCAN_BATCH_SIZE = %d", cfg.PositionScanBatchSize)
+	}
+	if cfg.PushHTTPURL != "http://localhost:8090" {
+		t.Fatalf("PUSH_HTTP_URL = %s", cfg.PushHTTPURL)
+	}
+	if cfg.PushRequestTimeout != time.Second {
+		t.Fatalf("PUSH_REQUEST_TIMEOUT = %s", cfg.PushRequestTimeout)
 	}
 	if cfg.OTELServiceName != "trip-service" {
 		t.Fatalf("OTEL_SERVICE_NAME = %s", cfg.OTELServiceName)
@@ -66,6 +94,15 @@ func TestLoadRejectsZeroTimeout(t *testing.T) {
 	t.Setenv("HTTP_READ_TIMEOUT", "0s")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error for zero timeout")
+	}
+}
+
+func TestLoadRejectsZeroWorkers(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://tripgo:tripgo@localhost:5432/tripgo?sslmode=disable")
+	t.Setenv(otelSemConvStabilityOptIn, "")
+	t.Setenv("POSITION_WORKERS", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for zero workers")
 	}
 }
 

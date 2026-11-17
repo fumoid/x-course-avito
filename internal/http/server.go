@@ -15,26 +15,34 @@ import (
 	createhttp "github.com/fumoid/x-course-avito/internal/http/trip/create"
 	finishhttp "github.com/fumoid/x-course-avito/internal/http/trip/finish"
 	gethttp "github.com/fumoid/x-course-avito/internal/http/trip/get"
+	createposhttp "github.com/fumoid/x-course-avito/internal/http/trip/position/create"
+	listposhttp "github.com/fumoid/x-course-avito/internal/http/trip/position/list"
 )
 
 type Server struct {
-	create *createhttp.Handler
-	get    *gethttp.Handler
-	finish *finishhttp.Handler
-	health *health.Handler
+	create    *createhttp.Handler
+	get       *gethttp.Handler
+	finish    *finishhttp.Handler
+	createPos *createposhttp.Handler
+	listPos   *listposhttp.Handler
+	health    *health.Handler
 }
 
 func New(
 	createHandler *createhttp.Handler,
 	getHandler *gethttp.Handler,
 	finishHandler *finishhttp.Handler,
+	createPosHandler *createposhttp.Handler,
+	listPosHandler *listposhttp.Handler,
 	healthHandler *health.Handler,
 ) *Server {
 	return &Server{
-		create: createHandler,
-		get:    getHandler,
-		finish: finishHandler,
-		health: healthHandler,
+		create:    createHandler,
+		get:       getHandler,
+		finish:    finishHandler,
+		createPos: createPosHandler,
+		listPos:   listPosHandler,
+		health:    healthHandler,
 	}
 }
 
@@ -48,6 +56,14 @@ func (s *Server) GetTrip(w http.ResponseWriter, r *http.Request, tripID api.Trip
 
 func (s *Server) FinishTrip(w http.ResponseWriter, r *http.Request, tripID api.TripId) {
 	s.finish.FinishTrip(w, r, tripID)
+}
+
+func (s *Server) CreateTripPosition(w http.ResponseWriter, r *http.Request, tripID api.TripId) {
+	s.createPos.CreateTripPosition(w, r, tripID)
+}
+
+func (s *Server) ListTripPositions(w http.ResponseWriter, r *http.Request, tripID api.TripId) {
+	s.listPos.ListTripPositions(w, r, tripID)
 }
 
 func (s *Server) Health(w http.ResponseWriter, r *http.Request) {

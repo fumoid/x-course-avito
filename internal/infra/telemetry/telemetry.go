@@ -27,9 +27,10 @@ import (
 )
 
 const (
-	serviceVersion = "lab2"
+	serviceVersion = "lab3"
 	meterName      = "github.com/fumoid/x-course-avito"
 	tracerName     = "github.com/fumoid/x-course-avito"
+	attrResult     = "result"
 )
 
 type Provider struct {
@@ -37,6 +38,8 @@ type Provider struct {
 	Tracer         trace.Tracer
 	Meter          metric.Meter
 	TripMetrics    *TripMetrics
+	PositionSaved  *PositionMetrics
+	WorkerMetrics  *WorkerMetrics
 	ActiveRequests metric.Int64UpDownCounter
 	DBDuration     metric.Float64Histogram
 	shutdown       []func(context.Context) error
@@ -59,6 +62,52 @@ func (m *TripMetrics) TripCompleted(ctx context.Context) {
 		return
 	}
 	m.completed.Add(ctx, 1)
+}
+
+type PositionMetrics struct {
+	saved metric.Int64Counter
+}
+
+func (m *PositionMetrics) PositionSaved(ctx context.Context) {
+	if m == nil || m.saved == nil {
+		return
+	}
+	m.saved.Add(ctx, 1)
+}
+
+type WorkerMetrics struct {
+	staleChecks     metric.Int64Counter
+	staleRows       metric.Float64Histogram
+	requests        metric.Int64Counter
+	requestDuration metric.Float64Histogram
+}
+
+func (m *WorkerMetrics) StaleCheck(ctx context.Context, result string) {
+	if m == nil || m.staleChecks == nil {
+		return
+	}
+	m.staleChecks.Add(ctx, 1, metric.WithAttributes(attribute.String(attrResult, result)))
+}
+
+func (m *WorkerMetrics) StaleChecksRowsRead(ctx context.Context, rows int64) {
+	if m == nil || m.staleRows == nil {
+		return
+	}
+	m.staleRows.Record(ctx, float64(rows))
+}
+
+func (m *WorkerMetrics) PositionRequest(ctx context.Context, result string) {
+	if m == nil || m.requests == nil {
+		return
+	}
+	m.requests.Add(ctx, 1, metric.WithAttributes(attribute.String(attrResult, result)))
+}
+
+func (m *WorkerMetrics) PositionRequestDuration(ctx context.Context, seconds float64, result string) {
+	if m == nil || m.requestDuration == nil {
+		return
+	}
+	m.requestDuration.Record(ctx, seconds, metric.WithAttributes(attribute.String(attrResult, result)))
 }
 
 func New(ctx context.Context, cfg config.Config) (*Provider, error) {
@@ -128,6 +177,50 @@ func (p *Provider) initInstruments() error {
 	}
 	p.TripMetrics = &TripMetrics{created: created, completed: completed}
 
+	positionsSaved, err := p.Meter.Int64Counter("tripgo.positions.saved",
+		metric.WithDescription("saved trip positions"),
+		metric.WithUnit("{position}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create positions.saved counter: %w", err)
+	}
+	p.PositionSaved = &PositionMetrics{saved: positionsSaved}
+
+	staleChecks, err := p.Meter.Int64Counter("tripgo.stale_checks",
+		metric.WithDescription("stale trip enqueue attempts"),
+		metric.WithUnit("{check}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create stale_checks counter: %w", err)
+	}
+	staleRows, err := p.Meter.Float64Histogram("tripgo.stale_checks.rows_read",
+		metric.WithDescription("stale trips read per scanner tick"),
+		metric.WithUnit("{row}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create stale_checks.rows_read histogram: %w", err)
+	}
+	requests, err := p.Meter.Int64Counter("tripgo.position_requests",
+		metric.WithDescription("position request attempts"),
+		metric.WithUnit("{request}"),
+	)
+	if err != nil {
+		return fmt.Errorf("create position_requests counter: %w", err)
+	}
+	requestDuration, err := p.Meter.Float64Histogram("tripgo.position_requests.duration",
+		metric.WithDescription("push service position request duration"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return fmt.Errorf("create position_requests.duration histogram: %w", err)
+	}
+	p.WorkerMetrics = &WorkerMetrics{
+		staleChecks:     staleChecks,
+		staleRows:       staleRows,
+		requests:        requests,
+		requestDuration: requestDuration,
+	}
+
 	active, err := p.Meter.Int64UpDownCounter("http.server.active_requests",
 		metric.WithDescription("in-flight HTTP requests"),
 		metric.WithUnit("{request}"),
@@ -163,6 +256,32 @@ func (p *Provider) RegisterActiveTrips(count func(context.Context) (int64, error
 	)
 	if err != nil {
 		return fmt.Errorf("create trips.active gauge: %w", err)
+	}
+	return nil
+}
+
+func (p *Provider) RegisterPositionPool(queueSize, activeWorkers func() int64) error {
+	_, err := p.Meter.Int64ObservableGauge("tripgo.position_requests.queue.size",
+		metric.WithDescription("position request queue size"),
+		metric.WithUnit("{trip}"),
+		metric.WithInt64Callback(func(_ context.Context, observer metric.Int64Observer) error {
+			observer.Observe(queueSize())
+			return nil
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("create position_requests.queue.size gauge: %w", err)
+	}
+	_, err = p.Meter.Int64ObservableGauge("tripgo.position_requests.workers.active",
+		metric.WithDescription("busy position request workers"),
+		metric.WithUnit("{worker}"),
+		metric.WithInt64Callback(func(_ context.Context, observer metric.Int64Observer) error {
+			observer.Observe(activeWorkers())
+			return nil
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("create position_requests.workers.active gauge: %w", err)
 	}
 	return nil
 }

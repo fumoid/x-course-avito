@@ -56,6 +56,7 @@ func run() error {
 		defer cancel()
 
 		var shutdownErr error
+		// 1. HTTP Shutdown: no new requests, in-flight requests finish.
 		if err := app.Server.Shutdown(shutdownCtx); err != nil {
 			app.Logger.ErrorContext(shutdownCtx, "forced shutdown after timeout", "error", err)
 			shutdownErr = fmt.Errorf("graceful HTTP shutdown: %w", err)
@@ -63,6 +64,7 @@ func run() error {
 				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("force close HTTP server: %w", closeErr))
 			}
 		}
+		// 2-4. Stop scanner, drain workers, close Push client, DB pool, telemetry.
 		if err := app.Close(shutdownCtx); err != nil {
 			shutdownErr = errors.Join(shutdownErr, err)
 		}

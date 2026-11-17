@@ -22,6 +22,13 @@ const (
 	defaultDatabaseConnect       = "5s"
 	defaultDatabaseQuery         = "3s"
 	defaultIdempotencyTTL        = "24h"
+	defaultPositionCheckInterval = "30s"
+	defaultPositionStaleAfter    = "60s"
+	defaultPositionWorkers       = "4"
+	defaultPositionQueueSize     = "100"
+	defaultPositionScanBatchSize = "100"
+	defaultPushHTTPURL           = "http://localhost:8090"
+	defaultPushRequestTimeout    = "1s"
 	defaultOTELServiceName       = "trip-service"
 	defaultOTELProtocol          = "grpc"
 	defaultOTELSampler           = "parentbased_always_on"
@@ -45,6 +52,13 @@ type Config struct {
 	DatabaseConnectTimeout   time.Duration
 	DatabaseQueryTimeout     time.Duration
 	IdempotencyTTL           time.Duration
+	PositionCheckInterval    time.Duration
+	PositionStaleAfter       time.Duration
+	PositionWorkers          int
+	PositionQueueSize        int
+	PositionScanBatchSize    int
+	PushHTTPURL              string
+	PushRequestTimeout       time.Duration
 	OTELServiceName          string
 	OTELExporterOTLPEndpoint string
 	OTELExporterOTLPProtocol string
@@ -101,6 +115,30 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	checkInterval, err := positiveDuration("POSITION_CHECK_INTERVAL", defaultPositionCheckInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	staleAfter, err := positiveDuration("POSITION_STALE_AFTER", defaultPositionStaleAfter)
+	if err != nil {
+		return Config{}, err
+	}
+	pushTimeout, err := positiveDuration("PUSH_REQUEST_TIMEOUT", defaultPushRequestTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	workers, err := positiveInt("POSITION_WORKERS", defaultPositionWorkers)
+	if err != nil {
+		return Config{}, err
+	}
+	queueSize, err := positiveInt("POSITION_QUEUE_SIZE", defaultPositionQueueSize)
+	if err != nil {
+		return Config{}, err
+	}
+	scanBatch, err := positiveInt("POSITION_SCAN_BATCH_SIZE", defaultPositionScanBatchSize)
+	if err != nil {
+		return Config{}, err
+	}
 
 	maxConns, err := int32Env("DATABASE_MAX_CONNS", defaultDatabaseMaxConns, 1)
 	if err != nil {
@@ -131,6 +169,13 @@ func Load() (Config, error) {
 		DatabaseConnectTimeout:   connectTimeout,
 		DatabaseQueryTimeout:     queryTimeout,
 		IdempotencyTTL:           ttl,
+		PositionCheckInterval:    checkInterval,
+		PositionStaleAfter:       staleAfter,
+		PositionWorkers:          workers,
+		PositionQueueSize:        queueSize,
+		PositionScanBatchSize:    scanBatch,
+		PushHTTPURL:              envOrDefault("PUSH_HTTP_URL", defaultPushHTTPURL),
+		PushRequestTimeout:       pushTimeout,
 		OTELServiceName:          envOrDefault("OTEL_SERVICE_NAME", defaultOTELServiceName),
 		OTELExporterOTLPEndpoint: envOrDefault("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		OTELExporterOTLPProtocol: strings.ToLower(envOrDefault("OTEL_EXPORTER_OTLP_PROTOCOL", defaultOTELProtocol)),
@@ -166,6 +211,14 @@ func positiveDuration(name, fallback string) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be greater than zero", name)
 	}
 	return duration, nil
+}
+
+func positiveInt(name, fallback string) (int, error) {
+	value, err := int32Env(name, fallback, 1)
+	if err != nil {
+		return 0, err
+	}
+	return int(value), nil
 }
 
 func int32Env(name, fallback string, minimum int64) (int32, error) {

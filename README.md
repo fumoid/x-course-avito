@@ -1,7 +1,8 @@
-# TripGo — лабораторная работа 2
+# TripGo — лабораторная работа 3
 
-Сервис создаёт, отдаёт и завершает поездки. Снаружи контракт тот же, что в ЛР1:
-HTTP API, PostgreSQL, идемпотентность и Docker. Внутри код разложен по слоям,
+Сервис ведёт поездки, принимает координаты и в фоне опрашивает устройства,
+у которых давно не было свежей точки. Снаружи — HTTP API, PostgreSQL,
+идемпотентность, Docker и Push Service. Внутри код разложен по слоям,
 покрыт тестами, проходит линтер и отдаёт логи, метрики и трейсы в OpenTelemetry.
 
 ## Запуск
@@ -19,8 +20,8 @@ make migrate
 make run
 ```
 
-`environment start` кладёт в `.env` адрес базы и OTLP-коллектора. Makefile читает
-`.env.example`, потом `.env`. Обязательна только `DATABASE_URL`.
+`environment start` кладёт в `.env` адрес базы, OTLP-коллектора и Push Service.
+Makefile читает `.env.example`, потом `.env`. Обязательна только `DATABASE_URL`.
 
 Сервис на `:8080`. Стоп — Ctrl+C, окружение — `tripgoctl environment stop`.
 
@@ -69,13 +70,27 @@ curl -i -X POST localhost:8080/api/v1/trips/$TRIP_ID/finish
 
 Второе завершение — `409 trip_completed`. Ошибки поездок — `application/problem+json` с полем `code`.
 
+Пока поездка active, можно слать координаты и читать маршрут:
+
+```sh
+curl -i -X POST localhost:8080/api/v1/trips/$TRIP_ID/positions \
+  -H 'Content-Type: application/json' \
+  -d '{"coordinates":{"latitude":59.9343,"longitude":30.3351},
+       "recorded_at":"2026-09-01T10:05:00Z"}'
+curl -i localhost:8080/api/v1/trips/$TRIP_ID/positions
+```
+
+`201` и точка в ответе. Повтор `GET` отдаёт все точки, сортировка `recorded_at, id`.
+Завершённая поездка больше не принимает координаты — `409 trip_completed`.
+
 ### Observability
 
 Ссылки на Jaeger и Grafana печатает `tripgoctl connect`. После запроса:
 
 - в логе есть `trace_id` / `span_id` и строка `request handled` с шаблоном маршрута;
 - в Jaeger тот же `trace_id`: корневой HTTP-спан и дочерние SQL;
-- в Grafana `http_server_request_duration` и `tripgo_trips_created`.
+- в Grafana `http_server_request_duration`, `tripgo_trips_created` и метрики пула
+  `tripgo_stale_checks`, `tripgo_position_requests`.
 
 Если коллектор недоступен, сервис продолжает отвечать.
 
@@ -127,6 +142,13 @@ docker run --rm --network host --env-file .env trip-service
 | DATABASE_CONNECT_TIMEOUT | 5s | коннект и ping на старте |
 | DATABASE_QUERY_TIMEOUT | 3s | запросы, begin/commit/rollback, /ready |
 | IDEMPOTENCY_TTL | 24h | сколько живёт ключ |
+| POSITION_CHECK_INTERVAL | 30s | период сканера устаревших поездок |
+| POSITION_STALE_AFTER | 60s | сколько молчит поездка, прежде чем её опросить |
+| POSITION_WORKERS | 4 | размер пула воркеров |
+| POSITION_QUEUE_SIZE | 100 | ёмкость приоритетной очереди |
+| POSITION_SCAN_BATCH_SIZE | 100 | размер порции keyset-выборки |
+| PUSH_HTTP_URL | http://localhost:8090 | Push Service |
+| PUSH_REQUEST_TIMEOUT | 1s | таймаут одного вызова Push |
 | OTEL_SERVICE_NAME | trip-service | имя в логах и трейсах |
 | OTEL_EXPORTER_OTLP_ENDPOINT | — | адрес коллектора из tripgoctl |
 | OTEL_EXPORTER_OTLP_PROTOCOL | grpc | grpc или http/protobuf |
@@ -146,8 +168,10 @@ cmd/trip-service          читает конфиг, container.New, ждёт с�
 internal/config           env
 internal/container        единственное место pgxpool.New и конструкторов
 internal/domain/trip      статусы, Trip.Finish, доменные ошибки
-internal/usecase/trip/{create,get,finish}
-internal/http/trip/{create,get,finish}
+internal/usecase/trip/{create,get,finish,position/{create,list}}
+internal/http/trip/{create,get,finish,position/{create,list}}
+internal/worker/positions   сканер, куча, пул воркеров
+internal/gateway/push       HTTP-клиент Push Service
 internal/http/domainerror единый маппинг ошибка → Problem
 internal/http/middleware  Recover → Tracing → Logging → Metrics
 internal/repository/trip
@@ -201,3 +225,45 @@ SQL инструментируется на пуле своим `QueryTracer`, �
 Входящий `traceparent` читает стандартный W3C-пропагатор (`otel.SetTextMapPropagator`).
 
 Имя сервиса в логах и трейсах одно — `OTEL_SERVICE_NAME`.
+
+## Опрос устаревших поездок
+
+Схема: **сканер → приоритетная куча → воркеры → Push Service**.
+
+Раз в `POSITION_CHECK_INTERVAL` одна горутина-сканер читает активные поездки,
+у которых `COALESCE(last_position_at, started_at)` старше `POSITION_STALE_AFTER`.
+Время считается в SQL. Выборка идёт порциями `POSITION_SCAN_BATCH_SIZE` с keyset
+по `(silent_since, id)`, без `OFFSET`. Первыми идут те, кто молчит дольше всех.
+Тики не накладываются: следующий обход стартует только после текущего.
+
+Постановка в очередь не блокируется. Результат каждой попытки виден в
+`tripgo.stale_checks{result=queued|duplicate|dropped}`. Сколько строк прочитали
+за тик — гистограмма `tripgo.stale_checks.rows_read`.
+
+Очередь — не канал, а `container/heap` ёмкости `POSITION_QUEUE_SIZE`. Ключ
+приоритета тот же: меньше `silent_since` — раньше в обработке, при равенстве
+меньше `id`. Рядом `map[tripID]` под мьютексом: дедуп и отмена. В неё пишут
+сканер, воркеры и `POST /positions`.
+
+Если поездка уже в map — `duplicate`. Если есть место — `queued`. Если куча
+полна, новая сравнивается с самой свежей: молчит дольше — вытесняет её
+(`dropped` + Warn), иначе дропается сама. Первый `dropped` на тике останавливает
+чтение следующих порций; следующий тик начинается с первой.
+
+`POSITION_WORKERS` горутин живут с старта. Задачу ждут через `sync.Cond`, без
+`Sleep`. Каждая обработка — `context.WithTimeout(..., PUSH_REQUEST_TIMEOUT)` и
+`POST {PUSH_HTTP_URL}/api/v1/push` с `kind=REQUEST_POSITION`. Спан воркера
+линкуется со спаном проверки через span link, вызов Push — отдельный client-span.
+Ошибка Push воркер не роняет.
+
+Когда приходит координата, usecase после INSERT вызывает `Cancel` —
+поездка честно удаляется из кучи, в `tripgo.position_requests{result=cancelled}`.
+Воркер, который уже pop-нул задачу, перед Push проверяет map и в Push не идёт:
+тоже `cancelled`.
+
+Выборка stale-поездок написана SQL-строкой, не squirrel: сравнение кортежа
+`(COALESCE(last_position_at, started_at), id) > cursor` так проще, и Postgres
+берёт index scan.
+
+Остановка в пределах одного `SHUTDOWN_TIMEOUT`: HTTP `Shutdown` → стоп сканера →
+воркеры добирают кучу → `CloseIdleConnections` клиента Push, пул БД, telemetry.

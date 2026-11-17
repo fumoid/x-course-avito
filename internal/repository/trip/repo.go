@@ -94,15 +94,27 @@ func (r *Repository) SaveStatusHistory(
 }
 
 func (r *Repository) Get(ctx context.Context, id uuid.UUID) (domain.Trip, error) {
+	return r.get(ctx, id, false)
+}
+
+func (r *Repository) GetForUpdate(ctx context.Context, id uuid.UUID) (domain.Trip, error) {
+	return r.get(ctx, id, true)
+}
+
+func (r *Repository) get(ctx context.Context, id uuid.UUID, forUpdate bool) (domain.Trip, error) {
 	ctx, cancel := r.withTimeout(ctx)
 	defer cancel()
 
-	query, args, err := psql.Select(
+	builder := psql.Select(
 		"id", "user_id", "driver_id",
 		"start_latitude", "start_longitude",
 		"end_latitude", "end_longitude",
-		"price", "status", "started_at", "finished_at",
-	).From("trips").Where(sq.Eq{"id": id}).ToSql()
+		"price", "status", "started_at", "finished_at", "last_position_at",
+	).From("trips").Where(sq.Eq{"id": id})
+	if forUpdate {
+		builder = builder.Suffix("FOR UPDATE")
+	}
+	query, args, err := builder.ToSql()
 	if err != nil {
 		return domain.Trip{}, fmt.Errorf("build select trip: %w", err)
 	}
@@ -113,7 +125,7 @@ func (r *Repository) Get(ctx context.Context, id uuid.UUID) (domain.Trip, error)
 		&t.ID, &t.UserID, &t.DriverID,
 		&t.StartLat, &t.StartLon,
 		&t.EndLat, &t.EndLon,
-		&t.Price, &status, &t.StartedAt, &t.FinishedAt,
+		&t.Price, &status, &t.StartedAt, &t.FinishedAt, &t.LastPositionAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Trip{}, domain.ErrTripNotFound
@@ -250,6 +262,137 @@ func (r *Repository) SaveIdempotency(ctx context.Context, rec domain.Idempotency
 		return fmt.Errorf("insert idempotency key: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) SavePosition(ctx context.Context, p domain.Position) (domain.Position, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
+	query, args, err := psql.Insert("trip_positions").
+		Columns("trip_id", "latitude", "longitude", "recorded_at").
+		Values(p.TripID, p.Latitude, p.Longitude, p.RecordedAt).
+		Suffix("RETURNING id").
+		ToSql()
+	if err != nil {
+		return domain.Position{}, fmt.Errorf("build insert position: %w", err)
+	}
+
+	if err := transaction.Executor(ctx, r.pool).QueryRow(ctx, query, args...).Scan(&p.ID); err != nil {
+		return domain.Position{}, fmt.Errorf("insert position: %w", err)
+	}
+	return p, nil
+}
+
+func (r *Repository) UpdateLastPositionAt(ctx context.Context, tripID uuid.UUID, recordedAt time.Time) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
+	query, args, err := psql.Update("trips").
+		Set("last_position_at", recordedAt).
+		Set("updated_at", sq.Expr("now()")).
+		Where(sq.Eq{"id": tripID}).
+		Where(sq.Or{
+			sq.Eq{"last_position_at": nil},
+			sq.Lt{"last_position_at": recordedAt},
+		}).
+		ToSql()
+	if err != nil {
+		return fmt.Errorf("build update last_position_at: %w", err)
+	}
+	if _, err := transaction.Executor(ctx, r.pool).Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("update last_position_at: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) ListPositions(ctx context.Context, tripID uuid.UUID) ([]domain.Position, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
+	query, args, err := psql.Select("id", "trip_id", "latitude", "longitude", "recorded_at").
+		From("trip_positions").
+		Where(sq.Eq{"trip_id": tripID}).
+		OrderBy("recorded_at ASC", "id ASC").
+		ToSql()
+	if err != nil {
+		return nil, fmt.Errorf("build list positions: %w", err)
+	}
+
+	rows, err := transaction.Executor(ctx, r.pool).Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list positions: %w", err)
+	}
+	defer rows.Close()
+
+	positions := make([]domain.Position, 0)
+	for rows.Next() {
+		var p domain.Position
+		if err := rows.Scan(&p.ID, &p.TripID, &p.Latitude, &p.Longitude, &p.RecordedAt); err != nil {
+			return nil, fmt.Errorf("scan position: %w", err)
+		}
+		positions = append(positions, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list positions: %w", err)
+	}
+	return positions, nil
+}
+
+const listStaleSQL = `
+SELECT id, driver_id, COALESCE(last_position_at, started_at) AS silent_since
+FROM trips
+WHERE status = 'active'
+  AND COALESCE(last_position_at, started_at) < now() - ($1 * INTERVAL '1 second')
+ORDER BY COALESCE(last_position_at, started_at) ASC, id ASC
+LIMIT $2
+`
+
+const listStaleKeysetSQL = `
+SELECT id, driver_id, COALESCE(last_position_at, started_at) AS silent_since
+FROM trips
+WHERE status = 'active'
+  AND COALESCE(last_position_at, started_at) < now() - ($1 * INTERVAL '1 second')
+  AND (COALESCE(last_position_at, started_at), id) > ($2, $3)
+ORDER BY COALESCE(last_position_at, started_at) ASC, id ASC
+LIMIT $4
+`
+
+func (r *Repository) ListStale(
+	ctx context.Context,
+	staleAfter time.Duration,
+	limit int,
+	cursor *domain.StaleCursor,
+) ([]domain.StaleTrip, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
+	exec := transaction.Executor(ctx, r.pool)
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if cursor == nil {
+		rows, err = exec.Query(ctx, listStaleSQL, staleAfter.Seconds(), limit)
+	} else {
+		rows, err = exec.Query(ctx, listStaleKeysetSQL, staleAfter.Seconds(), cursor.SilentSince, cursor.ID, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list stale trips: %w", err)
+	}
+	defer rows.Close()
+
+	trips := make([]domain.StaleTrip, 0, limit)
+	for rows.Next() {
+		var trip domain.StaleTrip
+		if err := rows.Scan(&trip.ID, &trip.DriverID, &trip.SilentSince); err != nil {
+			return nil, fmt.Errorf("scan stale trip: %w", err)
+		}
+		trips = append(trips, trip)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list stale trips: %w", err)
+	}
+	return trips, nil
 }
 
 func constraintName(err error) string {
